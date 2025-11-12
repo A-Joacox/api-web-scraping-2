@@ -23,8 +23,27 @@ def fetch_latest_sismos(limit: int = 10) -> List[Dict]:
     """
     results = []
 
+    # Ensure font/cache envs available at runtime (Lambda / containers)
+    os.environ.setdefault("XDG_CACHE_HOME", "/tmp/.cache")
+    os.environ.setdefault("FONTCONFIG_PATH", "/tmp/.fontconfig")
+
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        # Launch Chromium with flags suitable for headless containers / Lambda
+        browser = pw.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--single-process",
+                "--disable-extensions",
+                "--disable-background-networking",
+                "--disable-background-timer-throttling",
+                "--disable-breakpad",
+                "--no-zygote",
+            ],
+        )
         context = browser.new_context()
         page = context.new_page()
 
