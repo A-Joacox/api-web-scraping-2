@@ -6,7 +6,8 @@ from typing import List, Dict
 
 import boto3
 from botocore.exceptions import ClientError
-from playwright.sync_api import sync_playwright
+import requests
+from bs4 import BeautifulSoup
 
 # Página objetivo
 BASE_URL = "https://ultimosismo.igp.gob.pe"
@@ -17,73 +18,46 @@ logger = logging.getLogger(__name__)
 
 
 def fetch_latest_sismos(limit: int = 10) -> List[Dict]:
-    """Usa Playwright en modo headless para obtener los últimos 'limit' sismos.
+    """Usa requests + BeautifulSoup para obtener los últimos 'limit' sismos.
 
     Devuelve una lista de dicts con: referencia, reporte_url, fecha_hora, magnitud.
     """
-    results = []
+    results: List[Dict] = []
 
-    # Ensure font/cache envs available at runtime (Lambda / containers)
-    os.environ.setdefault("XDG_CACHE_HOME", "/tmp/.cache")
-    os.environ.setdefault("FONTCONFIG_PATH", "/tmp/.fontconfig")
+    logger.info("Fetching %s", TARGET_URL)
+    try:
+        resp = requests.get(TARGET_URL, timeout=10)
+        resp.raise_for_status()
+    except Exception as e:
+        logger.exception("Error descargando la página: %s", e)
+        return results
 
-    with sync_playwright() as pw:
-        # Launch Chromium with flags suitable for headless containers / Lambda
-        browser = pw.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--single-process",
-                "--disable-extensions",
-                "--disable-background-networking",
-                "--disable-background-timer-throttling",
-                "--disable-breakpad",
-                "--no-zygote",
-            ],
-        )
-        context = browser.new_context()
-        page = context.new_page()
+    soup = BeautifulSoup(resp.text, "html.parser")
+    rows = soup.select("table.table tbody tr")
+    logger.info("Filas encontradas: %d", len(rows))
 
-        logger.info("Navegando a %s", TARGET_URL)
-        page.goto(TARGET_URL, wait_until="networkidle")
+    for i, row in enumerate(rows[:limit]):
+        try:
+            tds = row.find_all("td")
+            referencia = tds[0].get_text(strip=True) if len(tds) > 0 else ""
+            fecha_hora = tds[2].get_text(strip=True) if len(tds) > 2 else ""
+            magnitud = tds[3].get_text(strip=True) if len(tds) > 3 else ""
 
-        # Esperar a que la tabla esté presente
-        page.wait_for_selector("table.table tbody tr", timeout=10000)
+            a = row.find("a", href=True)
+            href = a["href"] if a else None
+            reporte_url = urljoin(BASE_URL, href) if href else None
 
-        rows = page.query_selector_all("table.table tbody tr")
-        logger.info("Filas encontradas: %d", len(rows))
+            referencia = " ".join([s.strip() for s in referencia.splitlines() if s.strip()])
 
-        for i, row in enumerate(rows[:limit]):
-            try:
-                tds = row.query_selector_all("td")
-                # Basado en estructura observada: referencia en tds[0], fecha en tds[2], magnitud en tds[3]
-                referencia = tds[0].inner_text().strip() if len(tds) > 0 else ""
-                fecha_hora = tds[2].inner_text().strip() if len(tds) > 2 else ""
-                magnitud = tds[3].inner_text().strip() if len(tds) > 3 else ""
-
-                # Buscar enlace de reporte dentro de la fila
-                a = row.query_selector("a[href]")
-                href = a.get_attribute("href") if a else None
-                reporte_url = urljoin(BASE_URL, href) if href else None
-
-                # Limpiar referencia: a menudo contiene un salto de línea con código
-                referencia = " ".join([s.strip() for s in referencia.splitlines() if s.strip()])
-
-                item = {
-                    "referencia": referencia,
-                    "reporte_url": reporte_url,
-                    "fecha_hora": fecha_hora,
-                    "magnitud": magnitud,
-                }
-                results.append(item)
-            except Exception as e:
-                logger.exception("Error parseando fila %d: %s", i, e)
-
-        context.close()
-        browser.close()
+            item = {
+                "referencia": referencia,
+                "reporte_url": reporte_url,
+                "fecha_hora": fecha_hora,
+                "magnitud": magnitud,
+            }
+            results.append(item)
+        except Exception as e:
+            logger.exception("Error parseando fila %d: %s", i, e)
 
     return results
 
